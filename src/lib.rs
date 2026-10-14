@@ -333,7 +333,9 @@ struct Game {
 
 impl Game {
     /// 新开一局：随机放置两个初始方块。
-    fn new() -> Self {
+    ///
+    /// 随机数生成会调用宿主接口，因此 `rng` 由调用方在**不持有任何锁**时创建。
+    fn new(rng: &mut Rng) -> Self {
         let mut game = Self {
             cells: [0; CELLS],
             score: 0,
@@ -344,8 +346,8 @@ impl Game {
             recorded: false,
             history: Vec::new(),
         };
-        game.spawn_tile();
-        game.spawn_tile();
+        game.spawn_tile(rng);
+        game.spawn_tile(rng);
         game
     }
 
@@ -358,12 +360,11 @@ impl Game {
     }
 
     /// 在随机空格里生成一个新方块（90% 为 2，10% 为 4）。棋盘已满时返回 false。
-    fn spawn_tile(&mut self) -> bool {
+    fn spawn_tile(&mut self, rng: &mut Rng) -> bool {
         let empties = self.empty_indices();
         if empties.is_empty() {
             return false;
         }
-        let mut rng = Rng::new();
         let slot = empties[rng.below(empties.len())];
         self.cells[slot] = if rng.below(10) == 0 { 4 } else { 2 };
         true
@@ -389,7 +390,7 @@ impl Game {
     }
 
     /// 朝指定方向移动一步。棋盘没有变化时返回 false。
-    fn shift(&mut self, dir: Direction) -> bool {
+    fn shift(&mut self, dir: Direction, rng: &mut Rng) -> bool {
         let before = self.cells;
         let undo = Snapshot {
             cells: self.cells,
@@ -417,7 +418,7 @@ impl Game {
         self.score += gained;
         self.last_gain = gained;
         self.steps += 1;
-        self.spawn_tile();
+        self.spawn_tile(rng);
         if !self.can_move() {
             self.over = true;
         }
@@ -933,11 +934,13 @@ fn play(sender: &CommandSender, action: Action) {
             None => no_game_message(),
         },
         Action::Start => {
-            let (game, abandoned_score) = {
+            // 随机数种子来自宿主接口，必须在持锁之前取好。
+            let mut rng = Rng::new();
+            let (game, abandoned) = {
                 let mut list = games();
                 match index_of(&list, &name) {
                     Some(i) => {
-                        let old = std::mem::replace(&mut list[i].game, Game::new());
+                        let old = std::mem::replace(&mut list[i].game, Game::new(&mut rng));
                         let abandoned = if old.steps > 0 && !old.recorded {
                             Some(old)
                         } else {
@@ -946,7 +949,7 @@ fn play(sender: &CommandSender, action: Action) {
                         (list[i].game.clone(), abandoned)
                     }
                     None => {
-                        let fresh = Game::new();
+                        let fresh = Game::new(&mut rng);
                         list.push(Entry {
                             owner: name.clone(),
                             game: fresh.clone(),
@@ -956,7 +959,7 @@ fn play(sender: &CommandSender, action: Action) {
                 }
             };
 
-            let note = match abandoned_score {
+            let note = match abandoned {
                 Some(old) => {
                     let score = old.score;
                     let result = finish_game(&name, &old);
@@ -1022,6 +1025,7 @@ fn play(sender: &CommandSender, action: Action) {
             }
         }
         Action::Move(dir) => {
+            let mut rng = Rng::new();
             let outcome: Option<(Game, MoveNote, bool)> = {
                 let mut list = games();
                 match index_of(&list, &name) {
@@ -1030,7 +1034,7 @@ fn play(sender: &CommandSender, action: Action) {
                         let game = &mut list[i].game;
                         if game.over {
                             Some((game.clone(), MoveNote::Over, false))
-                        } else if !game.shift(dir) {
+                        } else if !game.shift(dir, &mut rng) {
                             Some((game.clone(), MoveNote::Blocked, false))
                         } else {
                             let gained = game.last_gain;
@@ -1077,9 +1081,10 @@ fn play(sender: &CommandSender, action: Action) {
                                 let result = if record {
                                     finish_game(&name, &game)
                                 } else {
+                                    let total = profiles().len();
                                     GameResult {
                                         rank: rank_of(&name),
-                                        total: profiles().len(),
+                                        total,
                                         new_best: false,
                                     }
                                 };
