@@ -58,6 +58,34 @@ const MAX_HISTORY: usize = 24;
 const TOP_N: usize = 10;
 /// 排行榜文件名（位于插件数据目录内）。
 const BOARD_FILE: &str = "leaderboard.tsv";
+/// 帮助里的命令条数。
+const HELP_COUNT: usize = 11;
+
+/// 命令描述。
+///
+/// 命令树在 `on_load` 里一次性注册，那时没有任何玩家上下文，因此这条**无法**
+/// 按玩家语言渲染。它在客户端的补全提示里对玩家可见，所以两种语言并列写在同一行。
+const COMMAND_DESCRIPTION: &str = "在聊天栏里玩 2048 小游戏 · Play 2048 in chat";
+/// 插件描述，同样在 `on_load` 时注册，无法按玩家语言渲染。
+const PLUGIN_DESCRIPTION: &str =
+    "在聊天栏里用命令对话玩 2048 小游戏（含全服排行榜）· Command-driven 2048 in chat, with a server-wide leaderboard";
+
+/// 帮助里的命令字面量，与各语言的 `help_descriptions` 一一对应。
+///
+/// 命令字面量本身不参与本地化：翻译它们会随玩家切换语言而悄悄改变命令语法。
+const HELP_COMMANDS: [&str; HELP_COUNT] = [
+    "2048 start",
+    "2048 up",
+    "2048 down",
+    "2048 left",
+    "2048 right",
+    "2048 undo",
+    "2048 show",
+    "2048 best",
+    "2048 me",
+    "2048 stop",
+    "2048 help",
+];
 
 // ---------------------------------------------------------------------------
 // 全局状态
@@ -510,6 +538,530 @@ fn slide(line: [u32; SIZE]) -> ([u32; SIZE], u32) {
 }
 
 // ---------------------------------------------------------------------------
+// 多语言
+// ---------------------------------------------------------------------------
+
+/// 插件支持的语言。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lang {
+    /// 简体中文。
+    ZhCn,
+    /// 英文，同时是所有未收录语言的回落目标。
+    EnUs,
+}
+
+impl Lang {
+    /// 依据客户端语言串选择语言。
+    ///
+    /// 只做前缀判断：`zh_cn`、`zh_tw`、`zh_hk` 都归入简体中文——对繁体玩家来说，
+    /// 简中远比英文易读；其余语言一律回落英文。
+    fn from_locale(locale: &str) -> Self {
+        if locale.to_ascii_lowercase().starts_with("zh") {
+            Lang::ZhCn
+        } else {
+            Lang::EnUs
+        }
+    }
+
+    fn strings(self) -> &'static dyn Strings {
+        match self {
+            Lang::ZhCn => &ZH_CN,
+            Lang::EnUs => &EN_US,
+        }
+    }
+}
+
+/// 面向玩家的全部文案。
+///
+/// 做成 trait 而不是静态字符串表，有三个理由：
+///
+/// 1. `format!` 要求格式串是**字面量**，静态表里的模板是运行期字符串，用不了。
+///    写成方法后模板仍是字面量，占位符个数或类型写错会直接编译失败，
+///    而不是运行期拼出半截句子。
+/// 2. 每种语言集中在一个 impl 里，便于整体校对译文。
+/// 3. 新增语言只需补一个 impl；漏实现任何一条都是编译错误。
+///
+/// 注意：命令字面量不参与本地化，只有面向玩家的散文是。
+trait Strings {
+    // --- 通用 ---
+    /// 可点击组件的悬停提示。
+    fn button_hint(&self, command: &str) -> String;
+
+    // --- 棋盘状态行 ---
+    fn status_score(&self, score: u32) -> String;
+    fn status_steps(&self, steps: u32) -> String;
+    fn status_max(&self, tile: u32) -> String;
+    fn status_rank(&self, rank: usize) -> String;
+    fn status_over(&self) -> &'static str;
+    fn status_won(&self) -> &'static str;
+
+    // --- 操作栏 ---
+    fn ctl_undo(&self) -> &'static str;
+    fn ctl_restart(&self) -> &'static str;
+    fn ctl_stop(&self) -> &'static str;
+    fn ctl_best(&self) -> &'static str;
+    fn ctl_me(&self) -> &'static str;
+
+    // --- 排行榜行 ---
+    fn rank_score(&self, score: u32) -> String;
+    fn rank_max(&self, tile: u32) -> String;
+    fn rank_games(&self, games: u32) -> String;
+
+    // --- 没有对局 ---
+    fn no_game(&self) -> &'static str;
+    fn no_game_click(&self) -> &'static str;
+    fn start_button(&self) -> &'static str;
+
+    // --- 帮助 ---
+    fn help_title(&self) -> &'static str;
+    fn help_descriptions(&self) -> [&'static str; HELP_COUNT];
+    fn help_rules(&self) -> &'static str;
+    fn help_keyboard(&self) -> &'static str;
+    fn help_leaderboard(&self) -> &'static str;
+
+    // --- 排行榜 ---
+    fn rank_title(&self) -> &'static str;
+    fn rank_empty(&self) -> &'static str;
+    fn rank_count(&self, players: usize) -> String;
+    fn rank_ellipsis(&self) -> &'static str;
+    fn rank_not_listed(&self) -> &'static str;
+    fn rank_more(&self) -> &'static str;
+    fn rank_me_button(&self) -> &'static str;
+
+    // --- 个人战绩 ---
+    fn me_title(&self) -> &'static str;
+    fn me_empty(&self) -> &'static str;
+    fn me_rank_label(&self) -> &'static str;
+    fn me_rank_value(&self, rank: usize, total: usize) -> String;
+    fn me_best_score_label(&self) -> &'static str;
+    fn me_best_tile_label(&self) -> &'static str;
+    fn me_games_label(&self) -> &'static str;
+    fn me_average_label(&self) -> &'static str;
+    fn me_steps_label(&self) -> &'static str;
+    fn me_more(&self) -> &'static str;
+    fn me_best_button(&self) -> &'static str;
+
+    // --- 交互反馈 ---
+    fn player_only(&self) -> &'static str;
+    fn start_abandoned(&self, score: u32) -> String;
+    fn start_abandoned_rank(&self, rank: usize, total: usize) -> String;
+    fn start_fresh(&self) -> &'static str;
+    fn undo_done(&self) -> &'static str;
+    fn undo_empty(&self) -> &'static str;
+    fn stop_summary(&self, score: u32) -> String;
+    fn stop_recorded(&self, rank: usize, total: usize) -> String;
+    fn move_over(&self) -> &'static str;
+    fn move_blocked(&self) -> &'static str;
+    fn move_dead(&self, score: u32) -> String;
+    fn move_new_best(&self) -> &'static str;
+    fn move_dead_rank(&self, rank: usize, total: usize) -> String;
+    fn move_again(&self) -> &'static str;
+    fn move_won(&self, gained: u32) -> String;
+    fn move_gained(&self, gained: u32) -> String;
+    fn move_done(&self) -> &'static str;
+}
+
+struct ZhCn;
+struct EnUs;
+
+static ZH_CN: ZhCn = ZhCn;
+static EN_US: EnUs = EnUs;
+
+impl Strings for ZhCn {
+    fn button_hint(&self, command: &str) -> String {
+        format!("点击执行 /{command}")
+    }
+
+    fn status_score(&self, score: u32) -> String {
+        format!("得分 {score}")
+    }
+    fn status_steps(&self, steps: u32) -> String {
+        format!("  步数 {steps}")
+    }
+    fn status_max(&self, tile: u32) -> String {
+        format!("  最大 {tile}")
+    }
+    fn status_rank(&self, rank: usize) -> String {
+        format!("  排名 #{rank}")
+    }
+    fn status_over(&self) -> &'static str {
+        "  已结束"
+    }
+    fn status_won(&self) -> &'static str {
+        "  已达成 2048"
+    }
+
+    fn ctl_undo(&self) -> &'static str {
+        "撤销"
+    }
+    fn ctl_restart(&self) -> &'static str {
+        "重开"
+    }
+    fn ctl_stop(&self) -> &'static str {
+        "结束"
+    }
+    fn ctl_best(&self) -> &'static str {
+        "排行"
+    }
+    fn ctl_me(&self) -> &'static str {
+        "战绩"
+    }
+
+    fn rank_score(&self, score: u32) -> String {
+        format!("  {score} 分")
+    }
+    fn rank_max(&self, tile: u32) -> String {
+        format!("  最大 {tile}")
+    }
+    fn rank_games(&self, games: u32) -> String {
+        format!("  {games} 局")
+    }
+
+    fn no_game(&self) -> &'static str {
+        "你当前没有进行中的 2048 对局。"
+    }
+    fn no_game_click(&self) -> &'static str {
+        "点击或输入 "
+    }
+    fn start_button(&self) -> &'static str {
+        "开始新的一局"
+    }
+
+    fn help_title(&self) -> &'static str {
+        "===== 2048 小游戏 ====="
+    }
+    fn help_descriptions(&self) -> [&'static str; HELP_COUNT] {
+        [
+            "开始 / 重开一局（别名 new、restart）",
+            "向上移动（别名 w）",
+            "向下移动（别名 s）",
+            "向左移动（别名 a）",
+            "向右移动（别名 d）",
+            "撤销上一步（别名 back、z）",
+            "重新显示棋盘（别名 board、b）",
+            "全服排行榜前 10 名（别名 top、rank、leaderboard）",
+            "我的战绩与排名（别名 stats、profile）",
+            "结束当前对局（别名 quit、end、exit）",
+            "显示这份说明（别名 h）",
+        ]
+    }
+    fn help_rules(&self) -> &'static str {
+        "玩法：相同数字相撞即合并，凑出 2048 即通关。"
+    }
+    fn help_keyboard(&self) -> &'static str {
+        "键盘玩家也可以直接用 WASD 快速操作。"
+    }
+    fn help_leaderboard(&self) -> &'static str {
+        "每局结束后成绩会自动计入排行榜并存档，重开服务器也不会丢。"
+    }
+
+    fn rank_title(&self) -> &'static str {
+        "===== 2048 全服排行榜 ====="
+    }
+    fn rank_empty(&self) -> &'static str {
+        "还没有任何记录，打出第一局就能登上榜首！"
+    }
+    fn rank_count(&self, players: usize) -> String {
+        format!("共 {players} 位玩家上榜 · 按最高分排序")
+    }
+    fn rank_ellipsis(&self) -> &'static str {
+        "  ……"
+    }
+    fn rank_not_listed(&self) -> &'static str {
+        "你还没有上榜，完成一局即可参与排名。"
+    }
+    fn rank_more(&self) -> &'static str {
+        "查看个人详情："
+    }
+    fn rank_me_button(&self) -> &'static str {
+        "我的战绩"
+    }
+
+    fn me_title(&self) -> &'static str {
+        "===== 我的 2048 战绩 ====="
+    }
+    fn me_empty(&self) -> &'static str {
+        "你还没有完成过任何一局 2048。"
+    }
+    fn me_rank_label(&self) -> &'static str {
+        "全服排名"
+    }
+    fn me_rank_value(&self, rank: usize, total: usize) -> String {
+        format!("#{rank} / {total} 人")
+    }
+    fn me_best_score_label(&self) -> &'static str {
+        "历史最高分"
+    }
+    fn me_best_tile_label(&self) -> &'static str {
+        "最大方块"
+    }
+    fn me_games_label(&self) -> &'static str {
+        "完成局数"
+    }
+    fn me_average_label(&self) -> &'static str {
+        "平均得分"
+    }
+    fn me_steps_label(&self) -> &'static str {
+        "累计步数"
+    }
+    fn me_more(&self) -> &'static str {
+        "查看全服排名："
+    }
+    fn me_best_button(&self) -> &'static str {
+        "排行榜"
+    }
+
+    fn player_only(&self) -> &'static str {
+        "2048 是玩家专属的小游戏，请在游戏内由玩家执行该命令。"
+    }
+    fn start_abandoned(&self, score: u32) -> String {
+        format!("新的一局开始！上一局中途放弃，得分 {score} 已计入排行榜。")
+    }
+    fn start_abandoned_rank(&self, rank: usize, total: usize) -> String {
+        format!("上一局排名 #{rank} / {total} 人。")
+    }
+    fn start_fresh(&self) -> &'static str {
+        "新的一局开始！方向键 / WASD / 点击下方按钮都可以移动。"
+    }
+    fn undo_done(&self) -> &'static str {
+        "已撤销一步。"
+    }
+    fn undo_empty(&self) -> &'static str {
+        "没有可以撤销的步骤了。"
+    }
+    fn stop_summary(&self, score: u32) -> String {
+        format!("本局结束，最终得分 {score}。")
+    }
+    fn stop_recorded(&self, rank: usize, total: usize) -> String {
+        format!("成绩已计入排行榜：当前排名 #{rank} / {total} 人。")
+    }
+    fn move_over(&self) -> &'static str {
+        "本局已经结束啦，用 /2048 start 或点击【重开】再来一局。"
+    }
+    fn move_blocked(&self) -> &'static str {
+        "这个方向没有方块可以移动，换个方向试试。"
+    }
+    fn move_dead(&self, score: u32) -> String {
+        format!("无处可走了，本局结束！得分 {score}。")
+    }
+    fn move_new_best(&self) -> &'static str {
+        "这是你的新纪录，已写入排行榜！"
+    }
+    fn move_dead_rank(&self, rank: usize, total: usize) -> String {
+        format!("当前排名 #{rank} / {total} 人。用 /2048 start 再来一局。")
+    }
+    fn move_again(&self) -> &'static str {
+        "用 /2048 start 再来一局。"
+    }
+    fn move_won(&self, gained: u32) -> String {
+        format!("恭喜！你合出了 2048，本步 +{gained} 分。继续挑战更大数字吧！")
+    }
+    fn move_gained(&self, gained: u32) -> String {
+        format!("合并得分 +{gained}。")
+    }
+    fn move_done(&self) -> &'static str {
+        "移动完成。"
+    }
+}
+
+impl Strings for EnUs {
+    fn button_hint(&self, command: &str) -> String {
+        format!("Click to run /{command}")
+    }
+
+    fn status_score(&self, score: u32) -> String {
+        format!("Score {score}")
+    }
+    fn status_steps(&self, steps: u32) -> String {
+        format!("  Steps {steps}")
+    }
+    fn status_max(&self, tile: u32) -> String {
+        format!("  Max {tile}")
+    }
+    fn status_rank(&self, rank: usize) -> String {
+        format!("  Rank #{rank}")
+    }
+    fn status_over(&self) -> &'static str {
+        "  Game over"
+    }
+    fn status_won(&self) -> &'static str {
+        "  Reached 2048"
+    }
+
+    fn ctl_undo(&self) -> &'static str {
+        "Undo"
+    }
+    fn ctl_restart(&self) -> &'static str {
+        "Restart"
+    }
+    fn ctl_stop(&self) -> &'static str {
+        "End"
+    }
+    fn ctl_best(&self) -> &'static str {
+        "Ranking"
+    }
+    fn ctl_me(&self) -> &'static str {
+        "Stats"
+    }
+
+    fn rank_score(&self, score: u32) -> String {
+        format!("  {score} pts")
+    }
+    fn rank_max(&self, tile: u32) -> String {
+        format!("  Max {tile}")
+    }
+    fn rank_games(&self, games: u32) -> String {
+        format!("  {games} games")
+    }
+
+    fn no_game(&self) -> &'static str {
+        "You have no 2048 game in progress."
+    }
+    fn no_game_click(&self) -> &'static str {
+        "Click or type "
+    }
+    fn start_button(&self) -> &'static str {
+        "Start a game"
+    }
+
+    fn help_title(&self) -> &'static str {
+        "===== 2048 ====="
+    }
+    fn help_descriptions(&self) -> [&'static str; HELP_COUNT] {
+        [
+            "Start or restart a game (aliases new, restart)",
+            "Move up (alias w)",
+            "Move down (alias s)",
+            "Move left (alias a)",
+            "Move right (alias d)",
+            "Undo the previous move (aliases back, z)",
+            "Re-display the board (aliases board, b)",
+            "Server-wide top 10 (aliases top, rank, leaderboard)",
+            "Your own stats and rank (aliases stats, profile)",
+            "End the current game (aliases quit, end, exit)",
+            "Show this reference (alias h)",
+        ]
+    }
+    fn help_rules(&self) -> &'static str {
+        "Rules: equal tiles merge when they collide; reach 2048 to win."
+    }
+    fn help_keyboard(&self) -> &'static str {
+        "Keyboard players can also just use WASD."
+    }
+    fn help_leaderboard(&self) -> &'static str {
+        "Every finished game is recorded to the leaderboard and saved to disk, so a server restart will not lose it."
+    }
+
+    fn rank_title(&self) -> &'static str {
+        "===== 2048 leaderboard ====="
+    }
+    fn rank_empty(&self) -> &'static str {
+        "No records yet - play one game to top the board!"
+    }
+    fn rank_count(&self, players: usize) -> String {
+        format!("{players} players on the board · sorted by best score")
+    }
+    fn rank_ellipsis(&self) -> &'static str {
+        "  ..."
+    }
+    fn rank_not_listed(&self) -> &'static str {
+        "You are not on the board yet - finish a game to join."
+    }
+    fn rank_more(&self) -> &'static str {
+        "Your own details:"
+    }
+    fn rank_me_button(&self) -> &'static str {
+        "My stats"
+    }
+
+    fn me_title(&self) -> &'static str {
+        "===== My 2048 stats ====="
+    }
+    fn me_empty(&self) -> &'static str {
+        "You have not finished a 2048 game yet."
+    }
+    fn me_rank_label(&self) -> &'static str {
+        "Server rank"
+    }
+    fn me_rank_value(&self, rank: usize, total: usize) -> String {
+        format!("#{rank} / {total} players")
+    }
+    fn me_best_score_label(&self) -> &'static str {
+        "Best score"
+    }
+    fn me_best_tile_label(&self) -> &'static str {
+        "Largest tile"
+    }
+    fn me_games_label(&self) -> &'static str {
+        "Games"
+    }
+    fn me_average_label(&self) -> &'static str {
+        "Average score"
+    }
+    fn me_steps_label(&self) -> &'static str {
+        "Total steps"
+    }
+    fn me_more(&self) -> &'static str {
+        "Server ranking:"
+    }
+    fn me_best_button(&self) -> &'static str {
+        "Leaderboard"
+    }
+
+    fn player_only(&self) -> &'static str {
+        "2048 is a player-only mini-game; run this command in game as a player."
+    }
+    fn start_abandoned(&self, score: u32) -> String {
+        format!("New game! The previous one was abandoned and its score of {score} was recorded.")
+    }
+    fn start_abandoned_rank(&self, rank: usize, total: usize) -> String {
+        format!("Previous game rank #{rank} / {total} players.")
+    }
+    fn start_fresh(&self) -> &'static str {
+        "New game! Use the arrow keys / WASD, or click a button below, to move."
+    }
+    fn undo_done(&self) -> &'static str {
+        "Undid one move."
+    }
+    fn undo_empty(&self) -> &'static str {
+        "Nothing left to undo."
+    }
+    fn stop_summary(&self, score: u32) -> String {
+        format!("Game ended. Final score {score}.")
+    }
+    fn stop_recorded(&self, rank: usize, total: usize) -> String {
+        format!("Score recorded on the leaderboard: rank #{rank} / {total} players.")
+    }
+    fn move_over(&self) -> &'static str {
+        "This game is already over - run /2048 start or click [Restart] to play again."
+    }
+    fn move_blocked(&self) -> &'static str {
+        "No tiles can move in that direction; try another."
+    }
+    fn move_dead(&self, score: u32) -> String {
+        format!("No moves left - game over! Score {score}.")
+    }
+    fn move_new_best(&self) -> &'static str {
+        "That is your new record - written to the leaderboard!"
+    }
+    fn move_dead_rank(&self, rank: usize, total: usize) -> String {
+        format!("Rank #{rank} / {total} players. Run /2048 start to play again.")
+    }
+    fn move_again(&self) -> &'static str {
+        "Run /2048 start to play again."
+    }
+    fn move_won(&self, gained: u32) -> String {
+        format!("Congratulations! You made 2048, +{gained} points this move. Keep going for a bigger tile!")
+    }
+    fn move_gained(&self, gained: u32) -> String {
+        format!("Merged for +{gained} points.")
+    }
+    fn move_done(&self) -> &'static str {
+        "Move complete."
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 文本渲染
 // ---------------------------------------------------------------------------
 
@@ -534,8 +1086,8 @@ fn dim(text: &str) -> TextComponent {
 }
 
 /// 一个可点击的按钮：点击后自动执行对应命令。
-fn button(command: &str, label: &str, color: NamedColor) -> TextComponent {
-    let hint = colored(&format!("点击执行 /{command}"), NamedColor::Gray);
+fn button(lang: Lang, command: &str, label: &str, color: NamedColor) -> TextComponent {
+    let hint = colored(&lang.strings().button_hint(command), NamedColor::Gray);
     TextComponent::text(&format!("[{label}] "))
         .color_named(color)
         .bold(true)
@@ -554,7 +1106,8 @@ fn rank_color(rank: usize) -> NamedColor {
 }
 
 /// 排行榜中的一行：`名次. 玩家  分数  最大方块  局数`。
-fn rank_line(rank: usize, profile: &Profile, highlight: bool) -> TextComponent {
+fn rank_line(lang: Lang, rank: usize, profile: &Profile, highlight: bool) -> TextComponent {
+    let s = lang.strings();
     let mut line = TextComponent::text("\n");
     line = line.add_child(colored(&format!("{rank:>2}. "), rank_color(rank)));
 
@@ -564,15 +1117,9 @@ fn rank_line(rank: usize, profile: &Profile, highlight: bool) -> TextComponent {
     }
     line = line.add_child(name);
 
-    line = line.add_child(colored(
-        &format!("  {} 分", profile.best_score),
-        NamedColor::Yellow,
-    ));
-    line = line.add_child(colored(
-        &format!("  最大 {}", profile.best_tile),
-        NamedColor::LightPurple,
-    ));
-    line = line.add_child(colored(&format!("  {} 局", profile.games), NamedColor::Gray));
+    line = line.add_child(colored(&s.rank_score(profile.best_score), NamedColor::Yellow));
+    line = line.add_child(colored(&s.rank_max(profile.best_tile), NamedColor::LightPurple));
+    line = line.add_child(colored(&s.rank_games(profile.games), NamedColor::Gray));
     line
 }
 
@@ -621,38 +1168,30 @@ fn tile(value: u32) -> TextComponent {
 }
 
 /// 顶部状态行，顺带带上玩家当前的全服名次。
-fn status_line(game: &Game, rank: Option<usize>) -> TextComponent {
+fn status_line(lang: Lang, game: &Game, rank: Option<usize>) -> TextComponent {
+    let s = lang.strings();
     let mut line = TextComponent::text("");
     line = line.add_child(
         TextComponent::text("2048 ")
             .color_named(NamedColor::Gold)
             .bold(true),
     );
-    line = line.add_child(colored(
-        &format!("得分 {}", game.score),
-        NamedColor::Yellow,
-    ));
-    line = line.add_child(colored(
-        &format!("  步数 {}", game.steps),
-        NamedColor::Aqua,
-    ));
-    line = line.add_child(colored(
-        &format!("  最大 {}", game.max_tile()),
-        NamedColor::LightPurple,
-    ));
+    line = line.add_child(colored(&s.status_score(game.score), NamedColor::Yellow));
+    line = line.add_child(colored(&s.status_steps(game.steps), NamedColor::Aqua));
+    line = line.add_child(colored(&s.status_max(game.max_tile()), NamedColor::LightPurple));
     if let Some(rank) = rank {
-        line = line.add_child(colored(&format!("  排名 #{rank}"), NamedColor::Blue));
+        line = line.add_child(colored(&s.status_rank(rank), NamedColor::Blue));
     }
 
     if game.over {
         line = line.add_child(
-            TextComponent::text("  已结束")
+            TextComponent::text(s.status_over())
                 .color_named(NamedColor::Red)
                 .bold(true),
         );
     } else if game.max_tile() >= TARGET {
         line = line.add_child(
-            TextComponent::text("  已达成 2048")
+            TextComponent::text(s.status_won())
                 .color_named(NamedColor::Green)
                 .bold(true),
         );
@@ -661,25 +1200,31 @@ fn status_line(game: &Game, rank: Option<usize>) -> TextComponent {
 }
 
 /// 底部可点击的操作栏。
-fn control_row() -> TextComponent {
+fn control_row(lang: Lang) -> TextComponent {
+    let s = lang.strings();
     let mut row = TextComponent::text("");
-    row = row.add_child(button("2048 up", "↑W", NamedColor::Green));
-    row = row.add_child(button("2048 left", "←A", NamedColor::Green));
-    row = row.add_child(button("2048 down", "↓S", NamedColor::Green));
-    row = row.add_child(button("2048 right", "→D", NamedColor::Green));
+    row = row.add_child(button(lang, "2048 up", "↑W", NamedColor::Green));
+    row = row.add_child(button(lang, "2048 left", "←A", NamedColor::Green));
+    row = row.add_child(button(lang, "2048 down", "↓S", NamedColor::Green));
+    row = row.add_child(button(lang, "2048 right", "→D", NamedColor::Green));
     row = row.add_child(TextComponent::text("  "));
-    row = row.add_child(button("2048 undo", "撤销", NamedColor::Yellow));
-    row = row.add_child(button("2048 start", "重开", NamedColor::Gold));
-    row = row.add_child(button("2048 stop", "结束", NamedColor::Red));
-    row = row.add_child(button("2048 best", "排行", NamedColor::Aqua));
-    row = row.add_child(button("2048 me", "战绩", NamedColor::LightPurple));
+    row = row.add_child(button(lang, "2048 undo", s.ctl_undo(), NamedColor::Yellow));
+    row = row.add_child(button(lang, "2048 start", s.ctl_restart(), NamedColor::Gold));
+    row = row.add_child(button(lang, "2048 stop", s.ctl_stop(), NamedColor::Red));
+    row = row.add_child(button(lang, "2048 best", s.ctl_best(), NamedColor::Aqua));
+    row = row.add_child(button(lang, "2048 me", s.ctl_me(), NamedColor::LightPurple));
     row
 }
 
 /// 完整的棋盘消息：状态行 + 4 行棋盘 + 操作栏 + 可选提示。
-fn board_message(game: &Game, rank: Option<usize>, note: Option<TextComponent>) -> TextComponent {
+fn board_message(
+    lang: Lang,
+    game: &Game,
+    rank: Option<usize>,
+    note: Option<TextComponent>,
+) -> TextComponent {
     let mut root = TextComponent::text("");
-    root = root.add_child(status_line(game, rank));
+    root = root.add_child(status_line(lang, game, rank));
 
     for r in 0..SIZE {
         root = root.add_child(TextComponent::text("\n"));
@@ -691,7 +1236,7 @@ fn board_message(game: &Game, rank: Option<usize>, note: Option<TextComponent>) 
     }
 
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(control_row());
+    root = root.add_child(control_row(lang));
 
     if let Some(note) = note {
         root = root.add_child(TextComponent::text("\n"));
@@ -701,121 +1246,114 @@ fn board_message(game: &Game, rank: Option<usize>, note: Option<TextComponent>) 
 }
 
 /// 带名次信息的棋盘（渲染时实时查询榜单）。
-fn board_with(game: &Game, owner: &str, note: Option<TextComponent>) -> TextComponent {
-    board_message(game, rank_of(owner), note)
+fn board_with(
+    lang: Lang,
+    game: &Game,
+    owner: &str,
+    note: Option<TextComponent>,
+) -> TextComponent {
+    board_message(lang, game, rank_of(owner), note)
 }
 
-fn no_game_message() -> TextComponent {
-    let mut root = tip("你当前没有进行中的 2048 对局。");
+fn no_game_message(lang: Lang) -> TextComponent {
+    let s = lang.strings();
+    let mut root = tip(s.no_game());
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(dim("点击或输入 "));
-    root = root.add_child(button("2048 start", "开始新的一局", NamedColor::Green));
+    root = root.add_child(dim(s.no_game_click()));
+    root = root.add_child(button(lang, "2048 start", s.start_button(), NamedColor::Green));
     root
 }
 
-fn help_message() -> TextComponent {
+fn help_message(lang: Lang) -> TextComponent {
+    let s = lang.strings();
     let mut root = TextComponent::text("");
     root = root.add_child(
-        TextComponent::text("===== 2048 小游戏 =====")
+        TextComponent::text(s.help_title())
             .color_named(NamedColor::Gold)
             .bold(true),
     );
 
-    let lines: [(&str, &str); 11] = [
-        ("2048 start", "开始 / 重开一局（别名 new、restart）"),
-        ("2048 up", "向上移动（别名 w）"),
-        ("2048 down", "向下移动（别名 s）"),
-        ("2048 left", "向左移动（别名 a）"),
-        ("2048 right", "向右移动（别名 d）"),
-        ("2048 undo", "撤销上一步（别名 back、z）"),
-        ("2048 show", "重新显示棋盘（别名 board、b）"),
-        ("2048 best", "全服排行榜前 10 名（别名 top、rank、leaderboard）"),
-        ("2048 me", "我的战绩与排名（别名 stats、profile）"),
-        ("2048 stop", "结束当前对局（别名 quit、end、exit）"),
-        ("2048 help", "显示这份说明（别名 h）"),
-    ];
-
-    for (command, description) in lines {
+    let descriptions = s.help_descriptions();
+    for (command, description) in HELP_COMMANDS.iter().zip(descriptions.iter()) {
         let mut line = TextComponent::text("\n");
         line = line.add_child(dim("  /"));
-        line = line.add_child(button(command, command, NamedColor::Aqua));
+        line = line.add_child(button(lang, command, command, NamedColor::Aqua));
         line = line.add_child(dim(&format!("- {description}")));
         root = root.add_child(line);
     }
 
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(tip("玩法：相同数字相撞即合并，凑出 2048 即通关。"));
+    root = root.add_child(tip(s.help_rules()));
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(dim("键盘玩家也可以直接用 WASD 快速操作。"));
+    root = root.add_child(dim(s.help_keyboard()));
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(dim("每局结束后成绩会自动计入排行榜并存档，重开服务器也不会丢。"));
+    root = root.add_child(dim(s.help_leaderboard()));
     root
 }
 
 /// 全服排行榜：前 `TOP_N` 名 + 请求者自己的名次。
-fn ranking_message(owner: &str) -> TextComponent {
+fn ranking_message(lang: Lang, owner: &str) -> TextComponent {
+    let s = lang.strings();
     let sorted = sorted_profiles();
 
     let mut root = TextComponent::text("");
     root = root.add_child(
-        TextComponent::text("===== 2048 全服排行榜 =====")
+        TextComponent::text(s.rank_title())
             .color_named(NamedColor::Gold)
             .bold(true),
     );
 
     if sorted.is_empty() {
         root = root.add_child(TextComponent::text("\n"));
-        root = root.add_child(dim("还没有任何记录，打出第一局就能登上榜首！"));
+        root = root.add_child(dim(s.rank_empty()));
         root = root.add_child(TextComponent::text("\n"));
-        root = root.add_child(button("2048 start", "开始新的一局", NamedColor::Green));
+        root = root.add_child(button(lang, "2048 start", s.start_button(), NamedColor::Green));
         return root;
     }
 
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(dim(&format!(
-        "共 {} 位玩家上榜 · 按最高分排序",
-        sorted.len()
-    )));
+    root = root.add_child(dim(&s.rank_count(sorted.len())));
 
     for (index, profile) in sorted.iter().take(TOP_N).enumerate() {
-        root = root.add_child(rank_line(index + 1, profile, profile.name == owner));
+        root = root.add_child(rank_line(lang, index + 1, profile, profile.name == owner));
     }
 
     match sorted.iter().position(|p| p.name == owner) {
         Some(index) if index + 1 > TOP_N => {
             root = root.add_child(TextComponent::text("\n"));
-            root = root.add_child(dim("  ……"));
-            root = root.add_child(rank_line(index + 1, &sorted[index], true));
+            root = root.add_child(dim(s.rank_ellipsis()));
+            root = root.add_child(rank_line(lang, index + 1, &sorted[index], true));
         }
         Some(_) => {}
         None => {
             root = root.add_child(TextComponent::text("\n"));
-            root = root.add_child(dim("你还没有上榜，完成一局即可参与排名。"));
+            root = root.add_child(dim(s.rank_not_listed()));
         }
     }
 
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(dim("查看个人详情："));
-    root = root.add_child(button("2048 me", "我的战绩", NamedColor::LightPurple));
+    root = root.add_child(dim(s.rank_more()));
+    root = root.add_child(button(lang, "2048 me", s.rank_me_button(), NamedColor::LightPurple));
     root
 }
 
 /// 个人战绩详情。
-fn me_message(owner: &str) -> TextComponent {
+fn me_message(lang: Lang, owner: &str) -> TextComponent {
+    let s = lang.strings();
     let sorted = sorted_profiles();
 
     let mut root = TextComponent::text("");
     root = root.add_child(
-        TextComponent::text("===== 我的 2048 战绩 =====")
+        TextComponent::text(s.me_title())
             .color_named(NamedColor::Gold)
             .bold(true),
     );
 
     let Some(profile) = sorted.iter().find(|p| p.name == owner) else {
         root = root.add_child(TextComponent::text("\n"));
-        root = root.add_child(dim("你还没有完成过任何一局 2048。"));
+        root = root.add_child(dim(s.me_empty()));
         root = root.add_child(TextComponent::text("\n"));
-        root = root.add_child(button("2048 start", "开始新的一局", NamedColor::Green));
+        root = root.add_child(button(lang, "2048 start", s.start_button(), NamedColor::Green));
         return root;
     };
 
@@ -830,39 +1368,39 @@ fn me_message(owner: &str) -> TextComponent {
     };
 
     root = root.add_child(stat_line(
-        "全服排名",
-        &format!("#{rank} / {} 人", sorted.len()),
+        s.me_rank_label(),
+        &s.me_rank_value(rank, sorted.len()),
         NamedColor::Aqua,
     ));
     root = root.add_child(stat_line(
-        "历史最高分",
+        s.me_best_score_label(),
         &profile.best_score.to_string(),
         NamedColor::Yellow,
     ));
     root = root.add_child(stat_line(
-        "最大方块",
+        s.me_best_tile_label(),
         &profile.best_tile.to_string(),
         NamedColor::LightPurple,
     ));
     root = root.add_child(stat_line(
-        "完成局数",
+        s.me_games_label(),
         &profile.games.to_string(),
         NamedColor::Gray,
     ));
     root = root.add_child(stat_line(
-        "平均得分",
+        s.me_average_label(),
         &average.to_string(),
         NamedColor::Green,
     ));
     root = root.add_child(stat_line(
-        "累计步数",
+        s.me_steps_label(),
         &profile.steps.to_string(),
         NamedColor::Gray,
     ));
 
     root = root.add_child(TextComponent::text("\n"));
-    root = root.add_child(dim("查看全服排名："));
-    root = root.add_child(button("2048 best", "排行榜", NamedColor::Aqua));
+    root = root.add_child(dim(s.me_more()));
+    root = root.add_child(button(lang, "2048 best", s.me_best_button(), NamedColor::Aqua));
     root
 }
 
@@ -913,25 +1451,36 @@ impl CommandHandler for Executor {
     }
 }
 
+/// 发送者使用的语言。
+///
+/// 从玩家客户端上报的 locale 取；控制台、命令方块等没有语言的来源一律回落英文
+/// （服务端日志与控制台的惯用语言）。
+fn sender_lang(sender: &CommandSender) -> Lang {
+    sender
+        .as_player()
+        .map_or(Lang::EnUs, |player| Lang::from_locale(&player.get_locale()))
+}
+
 /// 统一的入口：先取出需要的数据（避免在持有锁时调用宿主 API），再渲染并回复玩家。
 fn play(sender: &CommandSender, action: Action) {
+    // 语言每执行一条命令解析一次，随后作为 `Lang` 逐层传下去，
+    // 因此整条命令最多只发生一次 locale 查询。
+    let lang = sender_lang(sender);
+    let s = lang.strings();
+
     if !sender.is_player() {
-        let hint = colored(
-            "2048 是玩家专属的小游戏，请在游戏内由玩家执行该命令。",
-            NamedColor::Red,
-        );
-        sender.send_message(hint);
+        sender.send_message(colored(s.player_only(), NamedColor::Red));
         return;
     }
 
     let name = sender.get_name();
     let message = match action {
-        Action::Help => help_message(),
-        Action::Best => ranking_message(&name),
-        Action::Me => me_message(&name),
+        Action::Help => help_message(lang),
+        Action::Best => ranking_message(lang, &name),
+        Action::Me => me_message(lang, &name),
         Action::Show => match snapshot_of(&name) {
-            Some(game) => board_with(&game, &name, None),
-            None => no_game_message(),
+            Some(game) => board_with(lang, &game, &name, None),
+            None => no_game_message(lang),
         },
         Action::Start => {
             // 随机数种子来自宿主接口，必须在持锁之前取好。
@@ -963,21 +1512,16 @@ fn play(sender: &CommandSender, action: Action) {
                 Some(old) => {
                     let score = old.score;
                     let result = finish_game(&name, &old);
-                    let mut line = good(&format!(
-                        "新的一局开始！上一局中途放弃，得分 {score} 已计入排行榜。"
-                    ));
+                    let mut line = good(&s.start_abandoned(score));
                     if let Some(rank) = result.rank {
                         line = line.add_child(TextComponent::text("\n"));
-                        line = line.add_child(dim(&format!(
-                            "上一局排名 #{rank} / {} 人。",
-                            result.total
-                        )));
+                        line = line.add_child(dim(&s.start_abandoned_rank(rank, result.total)));
                     }
                     line
                 }
-                None => good("新的一局开始！方向键 / WASD / 点击下方按钮都可以移动。"),
+                None => good(s.start_fresh()),
             };
-            board_with(&game, &name, Some(note))
+            board_with(lang, &game, &name, Some(note))
         }
         Action::Undo => {
             let outcome = {
@@ -992,10 +1536,10 @@ fn play(sender: &CommandSender, action: Action) {
                 }
             };
             match outcome {
-                None => no_game_message(),
-                Some((game, true)) => board_with(&game, &name, Some(dim("已撤销一步。"))),
+                None => no_game_message(lang),
+                Some((game, true)) => board_with(lang, &game, &name, Some(dim(s.undo_done()))),
                 Some((game, false)) => {
-                    board_with(&game, &name, Some(tip("没有可以撤销的步骤了。")))
+                    board_with(lang, &game, &name, Some(tip(s.undo_empty())))
                 }
             }
         }
@@ -1005,22 +1549,19 @@ fn play(sender: &CommandSender, action: Action) {
                 index_of(&list, &name).map(|i| list.remove(i).game)
             };
             match removed {
-                None => no_game_message(),
+                None => no_game_message(lang),
                 Some(game) => {
-                    let mut line = dim(&format!("本局结束，最终得分 {}。", game.score));
+                    let mut line = dim(&s.stop_summary(game.score));
                     if game.steps > 0 && !game.recorded {
                         let mut recorded = game.clone();
                         recorded.recorded = true;
                         let result = finish_game(&name, &recorded);
                         if let Some(rank) = result.rank {
                             line = line.add_child(TextComponent::text("\n"));
-                            line = line.add_child(dim(&format!(
-                                "成绩已计入排行榜：当前排名 #{rank} / {} 人。",
-                                result.total
-                            )));
+                            line = line.add_child(dim(&s.stop_recorded(rank, result.total)));
                         }
                     }
-                    board_with(&game, &name, Some(line))
+                    board_with(lang, &game, &name, Some(line))
                 }
             }
         }
@@ -1063,15 +1604,11 @@ fn play(sender: &CommandSender, action: Action) {
             };
 
             match outcome {
-                None => no_game_message(),
+                None => no_game_message(lang),
                 Some((game, note, record)) => {
                     let line = match note {
-                        MoveNote::Over => {
-                            bad("本局已经结束啦，用 /2048 start 或点击【重开】再来一局。")
-                        }
-                        MoveNote::Blocked => {
-                            tip("这个方向没有方块可以移动，换个方向试试。")
-                        }
+                        MoveNote::Over => bad(s.move_over()),
+                        MoveNote::Blocked => tip(s.move_blocked()),
                         MoveNote::Moved {
                             gained,
                             won_now,
@@ -1088,35 +1625,29 @@ fn play(sender: &CommandSender, action: Action) {
                                         new_best: false,
                                     }
                                 };
-                                let mut line =
-                                    bad(&format!("无处可走了，本局结束！得分 {}。", game.score));
+                                let mut line = bad(&s.move_dead(game.score));
                                 if result.new_best {
                                     line = line.add_child(TextComponent::text("\n"));
-                                    line = line.add_child(good("这是你的新纪录，已写入排行榜！"));
+                                    line = line.add_child(good(s.move_new_best()));
                                 }
                                 if let Some(rank) = result.rank {
                                     line = line.add_child(TextComponent::text("\n"));
-                                    line = line.add_child(dim(&format!(
-                                        "当前排名 #{rank} / {} 人。用 /2048 start 再来一局。",
-                                        result.total
-                                    )));
+                                    line = line.add_child(dim(&s.move_dead_rank(rank, result.total)));
                                 } else {
                                     line = line.add_child(TextComponent::text("\n"));
-                                    line = line.add_child(dim("用 /2048 start 再来一局。"));
+                                    line = line.add_child(dim(s.move_again()));
                                 }
                                 line
                             } else if won_now {
-                                good(&format!(
-                                    "恭喜！你合出了 2048，本步 +{gained} 分。继续挑战更大数字吧！"
-                                ))
+                                good(&s.move_won(gained))
                             } else if gained > 0 {
-                                dim(&format!("合并得分 +{gained}。"))
+                                dim(&s.move_gained(gained))
                             } else {
-                                dim("移动完成。")
+                                dim(s.move_done())
                             }
                         }
                     };
-                    board_with(&game, &name, Some(line))
+                    board_with(lang, &game, &name, Some(line))
                 }
             }
         }
@@ -1142,7 +1673,7 @@ impl Plugin for TwoZeroFour {
             name: "two048".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             authors: vec!["WorkBuddy".into()],
-            description: "在聊天栏里用命令对话玩 2048 小游戏（含全服排行榜）".into(),
+            description: PLUGIN_DESCRIPTION.into(),
             dependencies: Vec::new(),
             // 排行榜需要读写插件私有数据目录。
             permissions: vec![FS_READ_DATA.to_string(), FS_WRITE_DATA.to_string()],
@@ -1171,7 +1702,7 @@ impl Plugin for TwoZeroFour {
             "t2048".to_string(),
             "game2048".to_string(),
         ];
-        let mut command = Command::new(&names, "在聊天栏里玩 2048 小游戏");
+        let mut command = Command::new(&names, COMMAND_DESCRIPTION);
 
         // 直接执行 /2048 时展示棋盘（或引导开始）。
         command = command.execute(Executor(Action::Show));
