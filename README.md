@@ -31,7 +31,7 @@ tree itself are language-independent.
 ## Requirements
 
 - A Pumpkin server whose plugin API matches the pinned crate version
-  (`pumpkin-plugin-api = "0.1.0-dev+26.2-26.45"`).
+  (`pumpkin-plugin-api = "0.2.0+26.3-26.51"`).
 - To build from source: a Rust toolchain with the `wasm32-wasip2` target installed.
 
 ```sh
@@ -204,7 +204,7 @@ version in `Cargo.toml` lines up with your server release.
 `fs.write.data` permissions to persist its data folder. Check the server log for a line starting
 with `two048:`; a failed write is reported there as a warning.
 
-**Cargo prints a warning about semver metadata.** `pumpkin-plugin-api = "0.1.0-dev+26.2-26.45"`
+**Cargo prints a warning about semver metadata.** `pumpkin-plugin-api = "0.2.0+26.3-26.51"`
 carries build metadata after the `+`, which Cargo ignores for version resolution and warns about.
 It is harmless. The version is pinned deliberately so that `cargo update` cannot silently move the
 plugin onto an API track your server does not implement.
